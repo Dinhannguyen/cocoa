@@ -1,0 +1,113 @@
+-- ===================== RADAR + HOP SERVER =====================
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local StarterGui = game:GetService("StarterGui")
+local TeleportService = game:GetService("TeleportService")
+local HttpService = game:GetService("HttpService")
+
+local LocalPlayer = Players.LocalPlayer
+local RADIUS = 200
+local HOP_THRESHOLD = 5 -- 30 giây xuất hiện liên tục
+
+-- Vòng tròn radar
+local visualsFolderName = "RadarVisuals"
+if workspace:FindFirstChild(visualsFolderName) then workspace[visualsFolderName]:Destroy() end
+local visualFolder = Instance.new("Folder")
+visualFolder.Name = visualsFolderName
+visualFolder.Parent = workspace
+
+local circlePart = Instance.new("Part")
+circlePart.Name = "SafeZoneCircle"
+circlePart.Shape = Enum.PartType.Cylinder
+circlePart.Material = Enum.Material.ForceField
+circlePart.Transparency = 0.8
+circlePart.Anchored = true
+circlePart.CanCollide = false
+circlePart.CastShadow = false
+circlePart.Size = Vector3.new(0.5, RADIUS*2, RADIUS*2)
+circlePart.Color = Color3.fromRGB(0,170,255)
+circlePart.Parent = visualFolder
+local rotation = CFrame.Angles(0,0,math.rad(90))
+
+-- Cảnh báo
+local function Notify(title, text)
+    StarterGui:SetCore("SendNotification", {Title = title; Text = text; Duration = 5})
+end
+
+-- Biến tracking player xuất hiện liên tục
+local playerTimers = {}
+
+-- Hop server ngẫu nhiên
+local function HopServer()
+    Notify("⚠️ HOP SERVER", "Player liên tục xuất hiện trong bán kính, hopping server...")
+    local success, serversData = pcall(function()
+        local url = "https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?sortOrder=Asc&limit=100"
+        return HttpService:JSONDecode(game:HttpGet(url))
+    end)
+    if success and serversData and serversData.data then
+        local availableServers = {}
+        for _, server in pairs(serversData.data) do
+            if server.id ~= game.JobId and server.playing < server.maxPlayers then
+                table.insert(availableServers, server)
+            end
+        end
+        if #availableServers > 0 then
+            local targetServer = availableServers[math.random(1,#availableServers)]
+            pcall(function()
+                TeleportService:TeleportToPlaceInstance(game.PlaceId, targetServer.id, LocalPlayer)
+            end)
+        end
+    end
+end
+
+-- ===================== LOGIC CHÍNH =====================
+RunService.RenderStepped:Connect(function()
+    local char = LocalPlayer.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then
+        circlePart.Transparency = 1 -- ẩn radar nếu chưa spawn
+        return
+    end
+    circlePart.Transparency = 0.8
+    circlePart.CFrame = CFrame.new(root.Position - Vector3.new(0,2.5,0)) * rotation
+
+    local isDanger = false
+    local currentPlayersInZone = {}
+
+    for _, player in pairs(Players:GetPlayers()) do
+        if player ~= LocalPlayer and player.Character then
+            local otherRoot = player.Character:FindFirstChild("HumanoidRootPart")
+            if otherRoot then
+                local distance = (otherRoot.Position - root.Position).Magnitude
+                if distance <= RADIUS then
+                    isDanger = true
+                    currentPlayersInZone[player.Name] = true
+
+                    -- Nếu player mới xuất hiện lần đầu, tạo timer
+                    if not playerTimers[player.Name] then
+                        playerTimers[player.Name] = 0
+                        Notify("⚠️ CẢNH BÁO", player.Name.." đang ở gần!")
+                    else
+                        playerTimers[player.Name] = playerTimers[player.Name] + RunService.RenderStepped:Wait()
+                        -- Nếu đã > HOP_THRESHOLD giây thì hop server
+                        if playerTimers[player.Name] >= HOP_THRESHOLD then
+                            HopServer()
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    -- Reset timer nếu player đã rời khỏi bán kính
+    for name,_ in pairs(playerTimers) do
+        if not currentPlayersInZone[name] then
+            playerTimers[name] = nil
+        end
+    end
+
+    -- Thay đổi màu vòng tròn
+    circlePart.Color = isDanger and Color3.fromRGB(255,50,50) or Color3.fromRGB(0,255,150)
+end)
+
+Notify("RADAR KÍCH HOẠT", "Bán kính quét: "..RADIUS.."m")

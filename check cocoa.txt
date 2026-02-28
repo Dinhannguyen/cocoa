@@ -1,0 +1,47 @@
+-- Cấu hình
+local targetItem = "Conjured Cocoa"
+local targetAmount = 10
+local checkInterval = 5 -- Giây giữa mỗi lần check
+
+local player = game:GetService("Players").LocalPlayer
+local remote = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("CommF_")
+
+print("--- Script Remote Inventory Check đã chạy ---")
+
+-- Hàm kiểm tra túi đồ qua Remote
+local function checkInventoryViaRemote()
+    -- Gọi Remote để lấy bảng dữ liệu inventory
+    local inventory = remote:InvokeServer("getInventory")
+    
+    if inventory and type(inventory) == "table" then
+        for _, item in pairs(inventory) do
+            -- Kiểm tra đúng tên vật phẩm và số lượng
+            if item.Name == targetItem then
+                local count = item.Count or item.Value or 0
+                
+                if count >= targetAmount then
+                    local filename = player.Name .. ".txt"
+                    local content = "Completed-Cocoa"
+                    
+                    if writefile then
+                        writefile(filename, content)
+                        print("Thành công! Đã tìm thấy " .. count .. " Cocoa. Đã ghi file.")
+                        return true -- Trả về true để dừng vòng lặp
+                    else
+                        warn("Executor không hỗ trợ writefile")
+                    end
+                end
+            end
+        end
+    end
+    return false
+end
+
+-- Vòng lặp thực thi
+task.spawn(function()
+    while true do
+        local success = checkInventoryViaRemote()
+        if success then break end -- Dừng script khi đã đạt yêu cầu và ghi file
+        task.wait(checkInterval)
+    end
+end)
