@@ -1,15 +1,35 @@
--- ===================== RADAR + HOP SERVER =====================
+-- ===================== RADAR + HOP SERVER (SERVER BROWSER) =====================
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local StarterGui = game:GetService("StarterGui")
-local TeleportService = game:GetService("TeleportService")
-local HttpService = game:GetService("HttpService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local UserInputService = game:GetService("UserInputService")
 
 local LocalPlayer = Players.LocalPlayer
-local RADIUS = 200
-local HOP_THRESHOLD = 5 -- 30 giây xuất hiện liên tục
 
--- Vòng tròn radar
+-- ===================== CẤU HÌNH RADAR =====================
+local RADIUS = 200
+local HOP_THRESHOLD = 5 -- Số giây xuất hiện liên tục để kích hoạt hop
+
+-- ===================== CẤU HÌNH HOP SERVER =====================
+math.randomseed(tick() + LocalPlayer.UserId)
+local targetCountMin = 1
+local targetCountMax = 4
+local targetRegion = "Singapore"
+local isHopping = false
+local processStarted = false
+local startTime = tick()
+local lastTriedJob = nil
+
+-- Cảnh báo
+local function Notify(title, text)
+    pcall(function()
+        StarterGui:SetCore("SendNotification", {Title = title; Text = text; Duration = 5})
+    end)
+end
+
+-- ===================== VISUAL RADAR =====================
 local visualsFolderName = "RadarVisuals"
 if workspace:FindFirstChild(visualsFolderName) then workspace[visualsFolderName]:Destroy() end
 local visualFolder = Instance.new("Folder")
@@ -29,45 +49,190 @@ circlePart.Color = Color3.fromRGB(0,170,255)
 circlePart.Parent = visualFolder
 local rotation = CFrame.Angles(0,0,math.rad(90))
 
--- Cảnh báo
-local function Notify(title, text)
-    StarterGui:SetCore("SendNotification", {Title = title; Text = text; Duration = 5})
-end
-
--- Biến tracking player xuất hiện liên tục
 local playerTimers = {}
 
--- Hop server ngẫu nhiên
-local function HopServer()
-    Notify("⚠️ HOP SERVER", "Player liên tục xuất hiện trong bán kính, hopping server...")
-    local success, serversData = pcall(function()
-        local url = "https://games.roblox.com/v1/games/"..game.PlaceId.."/servers/Public?sortOrder=Asc&limit=100"
-        return HttpService:JSONDecode(game:HttpGet(url))
+-- ===================== LOGIC HOP SERVER BROWSER =====================
+local function ClickRefresh()
+    pcall(function()
+        local gui = LocalPlayer.PlayerGui:FindFirstChild("ServerBrowser")
+        if not gui then return end
+        local frame = gui:FindFirstChild("Frame")
+        if not frame then return end
+  
+        local refreshBtn = frame:FindFirstChild("Refresh")
+        if refreshBtn and refreshBtn.Visible then
+            local x = refreshBtn.AbsolutePosition.X + (refreshBtn.AbsoluteSize.X / 2)
+            local y = refreshBtn.AbsolutePosition.Y + (refreshBtn.AbsoluteSize.Y / 2) + 58
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+            task.wait(0.05)
+            VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+        end
     end)
-    if success and serversData and serversData.data then
-        local availableServers = {}
-        for _, server in pairs(serversData.data) do
-            if server.id ~= game.JobId and server.playing < server.maxPlayers then
-                table.insert(availableServers, server)
-            end
-        end
-        if #availableServers > 0 then
-            local targetServer = availableServers[math.random(1,#availableServers)]
-            pcall(function()
-                TeleportService:TeleportToPlaceInstance(game.PlaceId, targetServer.id, LocalPlayer)
-            end)
-        end
+end
+
+local function HopWithServerBrowser(jobId)
+    local remote = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+    if remote then
+        pcall(function()
+            remote:InvokeServer("teleport", jobId)
+        end)
     end
 end
 
--- ===================== LOGIC CHÍNH =====================
-RunService.RenderStepped:Connect(function()
+local function FilterAndJump(serverList)
+    if isHopping or type(serverList) ~= "table" then return end
+
+    local candidates = {}
+
+    for jobId, info in pairs(serverList) do
+        if type(info) == "table" then
+            local pCount = tonumber(info.Count) or 0
+            local pRegion = tostring(info.Region) or ""
+
+            if jobId ~= game.JobId
+            and string.find(pRegion, targetRegion)
+            and (pCount >= targetCountMin and pCount <= targetCountMax) then
+                table.insert(candidates, jobId)
+            end
+        end
+    end
+
+    if #candidates > 0 then
+        local chosenJob = candidates[math.random(1, #candidates)]
+
+        isHopping = true
+        lastTriedJob = chosenJob
+
+        HopWithServerBrowser(chosenJob)
+
+        -- retry nếu fail → chọn server khác
+        task.spawn(function()
+            task.wait(5)
+            if game.JobId == lastTriedJob then
+                isHopping = false
+
+                if #candidates > 1 then
+                    local newJob
+                    repeat
+                        newJob = candidates[math.random(1, #candidates)]
+                    until newJob ~= lastTriedJob
+
+                    HopWithServerBrowser(newJob)
+                else
+                    HopWithServerBrowser(lastTriedJob)
+                end
+            end
+        end)
+    end
+end
+
+-- Hook server browser
+local mt = getrawmetatable(game)
+local oldNamecall = mt.__namecall
+setreadonly(mt, false)
+
+mt.__namecall = newcclosure(function(self, ...)
+    local method = getnamecallmethod()
+    local response = oldNamecall(self, ...)
+
+    if not isHopping
+    and (method == "InvokeServer" or method == "FireServer")
+    and tostring(self.Name) == "__ServerBrowser" then
+        if type(response) == "table" then
+            task.defer(function()
+                FilterAndJump(response)
+            end)
+        end
+    end
+
+    return response
+end)
+
+setreadonly(mt, true)
+
+local function StartHopProcess()
+    if processStarted then return end
+    processStarted = true
+    
+    Notify("⚠️ HOP SERVER", "Player trong vùng an toàn quá lâu, đang khởi động ServerBrowser...")
+
+    local ui = LocalPlayer:WaitForChild("PlayerGui"):WaitForChild("ServerBrowser", 5)
+    if ui then
+        ui.Enabled = true
+        local frame = ui:FindFirstChild("Frame")
+        if frame then 
+            frame.Visible = true 
+
+            local filters = frame:FindFirstChild("Filters")
+            if filters and filters:FindFirstChild("SearchRegion") and filters.SearchRegion:FindFirstChild("TextBox") then
+                filters.SearchRegion.TextBox.Text = targetRegion
+            end
+        end
+    else
+        Notify("LỖI", "Không tìm thấy giao diện ServerBrowser!")
+        processStarted = false
+        return
+    end
+    
+    startTime = tick()
+
+    task.spawn(function()
+        while not isHopping do
+            pcall(function()
+                local remote = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+                if remote then
+                    remote:InvokeServer(1, targetRegion)
+                end
+            end)
+
+            task.wait(3)
+
+            if not isHopping then
+                if (tick() - startTime) >= 10 then
+                    pcall(function()
+                        if ui then
+                            ui.Enabled = false
+                            task.wait(0.5)
+                            ui.Enabled = true
+
+                            if ui:FindFirstChild("Frame") then
+                                ui.Frame.Visible = true
+                            end
+                            
+                            local remote = ReplicatedStorage:FindFirstChild("__ServerBrowser")
+                            if remote then
+                                remote:InvokeServer(1, targetRegion)
+                            end
+                        end
+                    end)
+
+                    startTime = tick()
+                else
+                    if UserInputService.WindowFocused then
+                        ClickRefresh()
+                    end
+                end
+            end
+        end
+    end)
+end
+
+-- ===================== VÒNG LẶP CHÍNH =====================
+RunService.RenderStepped:Connect(function(deltaTime)
     local char = LocalPlayer.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
+    
+    -- Dừng quét nếu đang trong quá trình hop
+    if processStarted or isHopping then 
+        if circlePart then circlePart.Transparency = 1 end
+        return 
+    end
+
     if not root then
         circlePart.Transparency = 1 -- ẩn radar nếu chưa spawn
         return
     end
+    
     circlePart.Transparency = 0.8
     circlePart.CFrame = CFrame.new(root.Position - Vector3.new(0,2.5,0)) * rotation
 
@@ -88,10 +253,12 @@ RunService.RenderStepped:Connect(function()
                         playerTimers[player.Name] = 0
                         Notify("⚠️ CẢNH BÁO", player.Name.." đang ở gần!")
                     else
-                        playerTimers[player.Name] = playerTimers[player.Name] + RunService.RenderStepped:Wait()
+                        -- Sử dụng deltaTime thay vì Wait() để đếm thời gian chính xác và mượt hơn
+                        playerTimers[player.Name] = playerTimers[player.Name] + deltaTime
+                        
                         -- Nếu đã > HOP_THRESHOLD giây thì hop server
                         if playerTimers[player.Name] >= HOP_THRESHOLD then
-                            HopServer()
+                            StartHopProcess()
                         end
                     end
                 end
@@ -100,7 +267,7 @@ RunService.RenderStepped:Connect(function()
     end
 
     -- Reset timer nếu player đã rời khỏi bán kính
-    for name,_ in pairs(playerTimers) do
+    for name, _ in pairs(playerTimers) do
         if not currentPlayersInZone[name] then
             playerTimers[name] = nil
         end
